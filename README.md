@@ -1,9 +1,7 @@
 #
 
 <img width="1919" height="995" alt="Screenshot 2026-09-06 200358" src="https://github.com/user-attachments/assets/36286a8b-053c-4653-8194-80659e2d9cbd" />
-### 🎮 Short Video of Gameplay
-
-[▶️ Watch Gameplay Video](https://raw.githubusercontent.com/Vivekgithubb/Dangerous-Dave_Bhai/main/video1.mp4)
+### Play the game HERE :-https://vivekgithubb.github.io/Dangerous-Dave_Bhai/index.html
 
 
 
