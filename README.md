@@ -3,7 +3,7 @@
 <img width="1919" height="995" alt="Screenshot 2026-09-06 200358" src="https://github.com/user-attachments/assets/36286a8b-053c-4653-8194-80659e2d9cbd" />
 ### 🎮 Short Video of Gameplay
 
-[▶️ **Watch Gameplay Video**](./Delver Dan_ Caverns of Peril - Google Chrome 2026-09-06 20-04-37 (1).mp4)
+[▶️ **Watch Gameplay Video**](./video1.mp4)
 
 
 
