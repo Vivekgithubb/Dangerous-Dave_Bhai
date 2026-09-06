@@ -1,10 +1,10 @@
 #
 
 <img width="1919" height="995" alt="Screenshot 2026-09-06 200358" src="https://github.com/user-attachments/assets/36286a8b-053c-4653-8194-80659e2d9cbd" />
- Delver Dan: Caverns of Peril
-https://github.com/user-attachments/assets/fc1b1960-2fd8-4517-acd0-b97030b9e5e1
+Short Video of Gameplay :- https://github.com/user-attachments/assets/fc1b1960-2fd8-4517-acd0-b97030b9e5e1
 
 
+Delver Dan: Caverns of Peril
 A browser-based retro PC platformer recreation built as a **single
 self-contained HTML file** using only **HTML, CSS, and vanilla
 JavaScript**.
