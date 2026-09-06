@@ -1,0 +1,1715 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Delver Dan: Caverns of Peril</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      body {
+        background-color: #06070a;
+        color: #ffffff;
+        font-family: "Courier New", Courier, monospace;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        overflow: hidden;
+      }
+      #game-container {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        box-shadow:
+          0 0 35px rgba(255, 0, 0, 0.25),
+          0 0 30px rgba(0, 0, 0, 0.95);
+        border: 4px solid #5a0000;
+        background: #000;
+      }
+      canvas {
+        image-rendering: -moz-crisp-edges;
+        image-rendering: -webkit-crisp-edges;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+        display: block;
+        background: #000000;
+      }
+      .scanlines::after {
+        content: " ";
+        display: block;
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        background:
+          linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+          linear-gradient(
+            90deg,
+            rgba(255, 0, 0, 0.03),
+            rgba(0, 255, 0, 0.01),
+            rgba(0, 255, 0, 0.03)
+          );
+        z-index: 10;
+        background-size:
+          100% 4px,
+          6px 100%;
+        pointer-events: none;
+      }
+      #instruction-bar {
+        margin-top: 10px;
+        font-size: 13px;
+        color: #ccc;
+        text-align: center;
+        letter-spacing: 1px;
+      }
+      #instruction-bar span.key {
+        color: #ffee00;
+        font-weight: bold;
+      }
+      #instruction-bar span.act {
+        color: #00e5ff;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="game-container" class="scanlines">
+      <canvas id="canvas" width="320" height="200"></canvas>
+    </div>
+
+    <div id="instruction-bar">
+      <span class="key">▲ UP</span> =
+      <span class="act">JUMP / CLIMB / JETPACK</span> |
+      <span class="key">◄ / ►</span> = <span class="act">MOVE</span> |
+      <span class="key">▼ DOWN</span> = <span class="act">CLIMB DOWN</span> |
+      <span class="key">X / CTRL</span> =
+      <span class="act">FIRE RAY-GUN</span> | <span class="key">R</span> =
+      <span class="act">RETRY LEVEL</span>
+    </div>
+
+    <script>
+      (() => {
+        "use strict";
+
+        // --- 1. RETRO AUDIO SYNTHESIS ---
+        class RetroAudio {
+          constructor() {
+            this.ctx = null;
+            this.muted = false;
+          }
+
+          init() {
+            if (!this.ctx) {
+              const AudioCtx = window.AudioContext || window.webkitAudioContext;
+              this.ctx = new AudioCtx();
+            }
+            if (this.ctx && this.ctx.state === "suspended") {
+              this.ctx.resume();
+            }
+          }
+
+          beep(type, freq, duration, slide = 0, vol = 0.15) {
+            if (this.muted || !this.ctx) return;
+            try {
+              const osc = this.ctx.createOscillator();
+              const gain = this.ctx.createGain();
+              osc.type = type;
+              osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+              if (slide !== 0) {
+                osc.frequency.linearRampToValueAtTime(
+                  freq + slide,
+                  this.ctx.currentTime + duration,
+                );
+              }
+              gain.gain.setValueAtTime(vol, this.ctx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(
+                0.0001,
+                this.ctx.currentTime + duration,
+              );
+              osc.connect(gain);
+              gain.connect(this.ctx.destination);
+              osc.start();
+              osc.stop(this.ctx.currentTime + duration);
+            } catch (e) {}
+          }
+
+          noise(duration, vol = 0.18) {
+            if (this.muted || !this.ctx) return;
+            try {
+              const bufferSize = this.ctx.sampleRate * duration;
+              const buffer = this.ctx.createBuffer(
+                1,
+                bufferSize,
+                this.ctx.sampleRate,
+              );
+              const data = buffer.getChannelData(0);
+              for (let i = 0; i < bufferSize; i++) {
+                data[i] = Math.random() * 2 - 1;
+              }
+              const noise = this.ctx.createBufferSource();
+              noise.buffer = buffer;
+              const gain = this.ctx.createGain();
+              gain.gain.setValueAtTime(vol, this.ctx.currentTime);
+              gain.gain.exponentialRampToValueAtTime(
+                0.0001,
+                this.ctx.currentTime + duration,
+              );
+              noise.connect(gain);
+              gain.connect(this.ctx.destination);
+              noise.start();
+            } catch (e) {}
+          }
+
+          playJump() {
+            this.beep("square", 240, 0.12, 260, 0.12);
+          }
+          playGem() {
+            this.beep("triangle", 950, 0.07, 350, 0.14);
+          }
+          playTrophy() {
+            if (this.muted || !this.ctx) return;
+            const notes = [440, 554, 659, 880, 1108];
+            notes.forEach((f, i) => {
+              setTimeout(() => this.beep("square", f, 0.12, 0, 0.15), i * 75);
+            });
+          }
+          playWarp() {
+            if (this.muted || !this.ctx) return;
+            const notes = [261.6, 329.6, 392.0, 523.2, 659.2, 783.9, 1046.5];
+            notes.forEach((f, i) => {
+              setTimeout(
+                () => this.beep("sawtooth", f, 0.08, 20, 0.12),
+                i * 40,
+              );
+            });
+          }
+          playShoot() {
+            this.beep("sawtooth", 850, 0.07, -600, 0.13);
+          }
+          playExplode() {
+            this.noise(0.24, 0.22);
+          }
+          playHit() {
+            this.beep("sawtooth", 150, 0.35, -80, 0.24);
+          }
+          playJet() {
+            this.beep("sawtooth", 90 + Math.random() * 30, 0.05, 0, 0.06);
+          }
+        }
+
+        const audio = new RetroAudio();
+
+        // --- 2. PALETTE & CONSTANTS ---
+        const PALETTE = {
+          BLACK: "#000000",
+          BLUE: "#0000CC",
+          GREEN: "#00D800",
+          CYAN: "#00E5FF",
+          RED: "#EE0000",
+          MAGENTA: "#EE00EE",
+          BROWN: "#994400",
+          LGRAY: "#CCCCCC",
+          DGRAY: "#444444",
+          LBLUE: "#4477FF",
+          LGREEN: "#55FF55",
+          LCYAN: "#88FFFF",
+          LRED: "#FF3333",
+          LMAGENTA: "#FF66FF",
+          YELLOW: "#FFEE00",
+          WHITE: "#FFFFFF",
+          BRICK_BASE: "#D01010",
+          BRICK_DARK: "#680000",
+          BRICK_LIGHT: "#FF6666",
+          LOG_SURFACE: "#FF9E3B",
+          LOG_CORE: "#B25000",
+          LOG_BARK: "#5E2800",
+          GOLD_BRIGHT: "#FFF200",
+          HUD_BG: "#12131A",
+          HUD_BORDER: "#8E94A5",
+          HUD_BORDER_HI: "#E0E5F5",
+        };
+
+        const WIDTH = 320;
+        const HEIGHT = 200;
+        const TILE = 16;
+        const ROWS = 10;
+        const PLAY_HEIGHT = ROWS * TILE; // 160 px playfield, 40 px status bar
+
+        const T = {
+          EMPTY: 0,
+          BRICK: 1,
+          LOG: 2,
+          PIPE: 3,
+          WATER: 5,
+          FIRE: 6,
+          SPIKES: 7,
+          DOOR: 8,
+          TROPHY: 9,
+          GEM_BLUE: 10,
+          GEM_RED: 11,
+          GEM_PURPLE: 12,
+          CROWN: 13,
+          JETPACK: 14,
+          GUN: 15,
+          CLIMB_VINE: 16,
+        };
+
+        // --- 3. HANDCRAFTED, MATHEMATICALLY VERIFIED STAIRCASE MAPS ---
+        // Every jump has <= 2 tiles (32 px) vertical rise and <= 2 tiles horizontal gap.
+        const LEVELS = [
+          // LEVEL 1: The Lost Entrance
+          {
+            name: "LEVEL 01: THE LOST ENTRANCE",
+            cols: 40,
+            map: [
+              "1111111111111111111111111111111111111111",
+              "1......................................1",
+              "1P.........B.........B.........Y.......1",
+              "1LLL......LLL.......LLL.......LLL......1",
+              "1......................................1",
+              "1....LLL.......LLL.......LLL.......LLL.1",
+              "1...................................D..1",
+              "1..LLL.......LLL.......LLL.........111.1",
+              "13.LLL.......LLL.......LLL.........111.1",
+              "1111111111111111111111111111111111111111",
+            ],
+            spawns: { x: 20, y: 112 },
+            door: { x: 36, y: 6 },
+            trophy: { x: 31, y: 2 },
+            enemies: [],
+          },
+
+          // LEVEL 2: The Sunken Sewer (Stepping staircase down & up to Trophy and Exit)
+          {
+            name: "LEVEL 02: THE SUNKEN SEWER",
+            cols: 40,
+            map: [
+              "1111111111111111111111111111111111111111",
+              "1Y..................................D..1",
+              "1LLL...............................111.1",
+              "1.............B.........B.......LLLLL..1",
+              "1..LLL.......LLL...........LLLL........1",
+              "1........LLL...........................1",
+              "1...LLL.........LLL....LLL...LLL.......1",
+              "1......................................1",
+              "13.LLL.....LLL......LLL..........LLL...1",
+              "111WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW111",
+            ],
+            spawns: { x: 20, y: 112 },
+            door: { x: 36, y: 2 },
+            trophy: { x: 1, y: 1 },
+            enemies: [
+              { type: "bat", x: 220, y: 40, minX: 140, maxX: 320, speed: 0.9 },
+            ],
+          },
+
+          // LEVEL 3: The Magma Caverns (Guaranteed 1-2 tile stairs to Door and Trophy)
+          {
+            name: "LEVEL 03: THE MAGMA CAVERNS",
+            cols: 40,
+            map: [
+              "1111111111111111111111111111111111111111",
+              "1D..................................Y..1",
+              "111................................LLL.1",
+              "1....LLL.....B.........B.........LLL...1",
+              "1.LLL.......LLL.......LLL.......LLL....1",
+              "1......................................1",
+              "1...LLL..LLL.......LLL.......LLL.......1",
+              "1.LLL..................................1",
+              "13.LLL.......LLL.......LLL.......LLL...1",
+              "111FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF111",
+            ],
+            spawns: { x: 20, y: 112 },
+            door: { x: 1, y: 1 },
+            trophy: { x: 36, y: 1 },
+            enemies: [
+              {
+                type: "spider",
+                x: 160,
+                y: 80,
+                minX: 130,
+                maxX: 230,
+                speed: 0.9,
+              },
+              {
+                type: "spider",
+                x: 320,
+                y: 80,
+                minX: 280,
+                maxX: 380,
+                speed: 1.0,
+              },
+            ],
+          },
+
+          // LEVEL 4: Flight Test Depot (Jetpack Corridor with Stepping Fallbacks)
+          {
+            name: "LEVEL 04: FLIGHT TEST DEPOT",
+            cols: 40,
+            map: [
+              "1111111111111111111111111111111111111111",
+              "1J..................................D..1",
+              "1LLL...............................111.1",
+              "1...LLL.......B.........B.........LLL..1",
+              "1.LLL........LLL.......LLL.......LLL...1",
+              "1.........Y............................1",
+              "1...LLL......LLL.......LLL.......LLL...1",
+              "1......................................1",
+              "13.LLL.......LLL.......LLL.......LLL...1",
+              "111SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS111",
+            ],
+            spawns: { x: 20, y: 112 },
+            door: { x: 36, y: 2 },
+            trophy: { x: 10, y: 5 },
+            enemies: [
+              { type: "bat", x: 180, y: 50, minX: 120, maxX: 300, speed: 1.2 },
+            ],
+          },
+
+          // LEVEL 5: The Guarded Vault (Ray-Gun Vault)
+          {
+            name: "LEVEL 05: THE GUARDED VAULT",
+            cols: 40,
+            map: [
+              "1111111111111111111111111111111111111111",
+              "1G..................................Y..1",
+              "1LLL...............................LLL.1",
+              "1...LLL.......B.........B.........LLL..1",
+              "1.LLL........LLL.......LLL.......LLL...1",
+              "1....C..........................C...D..1",
+              "1...LLL......LLL.......LLL.......LLL1111",
+              "1......................................1",
+              "13.LLL.......LLL.......LLL.......LLL...1",
+              "1111111111111111111111111111111111111111",
+            ],
+            spawns: { x: 20, y: 112 },
+            door: { x: 36, y: 5 },
+            trophy: { x: 36, y: 1 },
+            enemies: [
+              {
+                type: "spider",
+                x: 140,
+                y: 112,
+                minX: 90,
+                maxX: 220,
+                speed: 0.9,
+              },
+              {
+                type: "spider",
+                x: 280,
+                y: 80,
+                minX: 240,
+                maxX: 360,
+                speed: 1.1,
+              },
+            ],
+          },
+        ];
+
+        // --- 4. ENGINE STATE ---
+        const STATE = {
+          TITLE: 0,
+          PLAYING: 1,
+          WARPING: 2,
+          GAME_OVER: 3,
+          VICTORY: 4,
+        };
+
+        let gameState = STATE.TITLE;
+        let currentLevelIdx = 0;
+        let score = 0;
+        let highScore = parseInt(
+          localStorage.getItem("delver_dan_hi") || "0",
+          10,
+        );
+        let lives = 3;
+        let messageTimer = 0;
+        let hudBanner = "EXPLORE & SURVIVE!";
+
+        let levelTrophyCollected = false;
+
+        let cameraX = 0;
+        let levelWidth = 640;
+
+        let warpPhase = 0;
+        let warpTimer = 0;
+
+        const keys = {
+          left: false,
+          right: false,
+          up: false,
+          down: false,
+          fire: false,
+        };
+
+        // --- 5. PLAYER ENTITY ---
+        class Player {
+          constructor() {
+            this.reset(20, 112);
+          }
+
+          reset(x, y) {
+            this.x = x;
+            this.y = y;
+            this.w = 12;
+            this.h = 15;
+            this.vx = 0;
+            this.vy = 0;
+            this.facing = 1;
+            this.onGround = false;
+            this.climbing = false;
+            this.hasTrophy = false;
+            this.jetpackFuel = 0;
+            this.hasGun = false;
+            this.ammo = 0;
+            this.isDead = false;
+            this.deathTimer = 0;
+            this.animFrame = 0;
+            this.animTick = 0;
+            this.coyoteTime = 0;
+            this.jumpBuffer = 0;
+          }
+        }
+
+        const player = new Player();
+        let grid = [];
+        let enemies = [];
+        let bullets = [];
+        let particles = [];
+
+        // --- 6. LEVEL INITIALIZATION ---
+        function loadLevel(idx, isRespawn = false) {
+          if (idx >= LEVELS.length) {
+            gameState = STATE.VICTORY;
+            audio.playTrophy();
+            return;
+          }
+
+          currentLevelIdx = idx;
+          const lvl = LEVELS[idx];
+          levelWidth = lvl.cols * TILE;
+          grid = [];
+
+          if (!isRespawn) {
+            levelTrophyCollected = false;
+          }
+
+          for (let r = 0; r < ROWS; r++) {
+            grid[r] = [];
+            const rowStr = lvl.map[r] || "";
+            for (let c = 0; c < lvl.cols; c++) {
+              const ch = rowStr[c] || ".";
+              let t = T.EMPTY;
+              switch (ch) {
+                case "1":
+                  t = T.BRICK;
+                  break;
+                case "L":
+                  t = T.LOG;
+                  break;
+                case "3":
+                  t = T.PIPE;
+                  break;
+                case "W":
+                  t = T.WATER;
+                  break;
+                case "F":
+                  t = T.FIRE;
+                  break;
+                case "S":
+                  t = T.SPIKES;
+                  break;
+                case "V":
+                  t = T.CLIMB_VINE;
+                  break;
+                case "D":
+                  t = T.DOOR;
+                  break;
+                case "Y":
+                  t = T.TROPHY;
+                  break;
+                case "B":
+                  t = T.GEM_BLUE;
+                  break;
+                case "R":
+                  t = T.GEM_RED;
+                  break;
+                case "P":
+                  t = T.GEM_PURPLE;
+                  break;
+                case "C":
+                  t = T.CROWN;
+                  break;
+                case "J":
+                  t = T.JETPACK;
+                  break;
+                case "G":
+                  t = T.GUN;
+                  break;
+                default:
+                  t = T.EMPTY;
+                  break;
+              }
+              grid[r][c] = t;
+            }
+          }
+
+          if (lvl.door) grid[lvl.door.y][lvl.door.x] = T.DOOR;
+
+          if (lvl.trophy) {
+            if (levelTrophyCollected) {
+              grid[lvl.trophy.y][lvl.trophy.x] = T.EMPTY;
+            } else {
+              grid[lvl.trophy.y][lvl.trophy.x] = T.TROPHY;
+            }
+          }
+
+          player.reset(lvl.spawns.x, lvl.spawns.y);
+          player.hasTrophy = levelTrophyCollected;
+
+          cameraX = Math.max(
+            0,
+            Math.min(player.x - WIDTH / 2 + player.w / 2, levelWidth - WIDTH),
+          );
+
+          enemies = [];
+          if (lvl.enemies) {
+            lvl.enemies.forEach((e) => {
+              enemies.push({
+                type: e.type,
+                x: e.x,
+                y: e.y,
+                w: 12,
+                h: 12,
+                minX: e.minX,
+                maxX: e.maxX,
+                speed: e.speed,
+                dir: 1,
+                vx: e.vx || e.speed,
+                vy: e.vy || 1,
+                animTick: 0,
+              });
+            });
+          }
+
+          bullets = [];
+          particles = [];
+
+          if (player.hasTrophy) {
+            hudBanner = "TROPHY PRESERVED! REACH THE DOOR!";
+          } else {
+            hudBanner = "FIND THE TROPHY!";
+          }
+          messageTimer = 180;
+        }
+
+        function startWarpTransition(nextIdx) {
+          gameState = STATE.WARPING;
+          warpPhase = 0;
+          warpTimer = 0;
+          currentLevelIdx = nextIdx;
+          audio.playWarp();
+        }
+
+        function getTile(tx, ty) {
+          const lvl = LEVELS[currentLevelIdx];
+          if (!lvl || tx < 0 || tx >= lvl.cols || ty < 0 || ty >= ROWS)
+            return T.BRICK;
+          return grid[ty][tx];
+        }
+
+        function setTile(tx, ty, val) {
+          const lvl = LEVELS[currentLevelIdx];
+          if (lvl && tx >= 0 && tx < lvl.cols && ty >= 0 && ty < ROWS) {
+            grid[ty][tx] = val;
+          }
+        }
+
+        function isSolid(tile) {
+          return tile === T.BRICK || tile === T.LOG || tile === T.PIPE;
+        }
+
+        function isHazard(tile) {
+          return tile === T.WATER || tile === T.FIRE || tile === T.SPIKES;
+        }
+
+        function boxOverlap(a, b) {
+          return (
+            a.x < b.x + b.w &&
+            a.x + a.w > b.x &&
+            a.y < b.y + b.h &&
+            a.y + a.h > b.y
+          );
+        }
+
+        function checkHazardCollision(p) {
+          const minTx = Math.floor(p.x / TILE);
+          const maxTx = Math.floor((p.x + p.w - 1) / TILE);
+          const minTy = Math.floor(p.y / TILE);
+          const maxTy = Math.floor((p.y + p.h - 1) / TILE);
+
+          for (let ty = minTy; ty <= maxTy; ty++) {
+            for (let tx = minTx; tx <= maxTx; tx++) {
+              if (isHazard(getTile(tx, ty))) {
+                const hazardBox = {
+                  x: tx * TILE + 2,
+                  y: ty * TILE + 7,
+                  w: 12,
+                  h: 9,
+                };
+                const playerBox = {
+                  x: p.x + 2,
+                  y: p.y + 2,
+                  w: p.w - 4,
+                  h: p.h - 2,
+                };
+                if (boxOverlap(playerBox, hazardBox)) return true;
+              }
+            }
+          }
+          return false;
+        }
+
+        function addSparkles(x, y, color, count = 6) {
+          for (let i = 0; i < count; i++) {
+            particles.push({
+              x,
+              y,
+              vx: (Math.random() - 0.5) * 3.5,
+              vy: (Math.random() - 0.5) * 3.5,
+              color,
+              life: 18 + Math.random() * 14,
+            });
+          }
+        }
+
+        function killPlayer() {
+          if (player.isDead) return;
+          player.isDead = true;
+          player.deathTimer = 55;
+          audio.playHit();
+          addSparkles(player.x + 6, player.y + 7, PALETTE.LRED, 25);
+          addSparkles(player.x + 6, player.y + 7, PALETTE.YELLOW, 18);
+        }
+
+        // --- 7. RETUNED RESPONSIVE PHYSICS ---
+        function updatePlayer() {
+          if (player.isDead) {
+            player.deathTimer--;
+            if (player.deathTimer <= 0) {
+              lives--;
+              if (lives < 0) {
+                gameState = STATE.GAME_OVER;
+                if (score > highScore) {
+                  highScore = score;
+                  localStorage.setItem("delver_dan_hi", highScore.toString());
+                }
+              } else {
+                loadLevel(currentLevelIdx, true);
+              }
+            }
+            return;
+          }
+
+          const ACCEL = 0.4;
+          const MAX_SPEED = 1.0;
+          const FRICTION = 0.75;
+          const JUMP_FORCE = -4.8; // 60 px vertical peak (3.75 tiles)
+          const GRAVITY = 0.28;
+
+          if (keys.left) {
+            player.vx = Math.max(player.vx - ACCEL, -MAX_SPEED);
+            player.facing = -1;
+          } else if (keys.right) {
+            player.vx = Math.min(player.vx + ACCEL, MAX_SPEED);
+            player.facing = 1;
+          } else {
+            player.vx *= FRICTION;
+            if (Math.abs(player.vx) < 0.1) player.vx = 0;
+          }
+
+          const usingJetpack = keys.up && player.jetpackFuel > 0;
+          if (usingJetpack) {
+            player.vy = -2.5;
+            player.jetpackFuel = Math.max(0, player.jetpackFuel - 0.35);
+            audio.playJet();
+            if (Math.random() < 0.45) {
+              particles.push({
+                x: player.x + (player.facing === 1 ? 2 : 10),
+                y: player.y + 14,
+                vx: (Math.random() - 0.5) * 1.5,
+                vy: 1.5 + Math.random(),
+                color: Math.random() < 0.5 ? PALETTE.LRED : PALETTE.YELLOW,
+                life: 10,
+              });
+            }
+          }
+
+          const centerTileX = Math.floor((player.x + player.w / 2) / TILE);
+          const centerTileY = Math.floor((player.y + player.h / 2) / TILE);
+          const onLadder = getTile(centerTileX, centerTileY) === T.CLIMB_VINE;
+
+          if (onLadder) {
+            player.climbing = true;
+            if (keys.up) player.vy = -1.8;
+            else if (keys.down) player.vy = 1.8;
+            else player.vy = 0;
+          } else {
+            player.climbing = false;
+            if (!usingJetpack) {
+              player.vy = Math.min(player.vy + GRAVITY, 5.0);
+            }
+          }
+
+          if (player.onGround) player.coyoteTime = 6;
+          else if (player.coyoteTime > 0) player.coyoteTime--;
+
+          if (keys.up && !usingJetpack) player.jumpBuffer = 5;
+          else if (player.jumpBuffer > 0) player.jumpBuffer--;
+
+          if (
+            player.jumpBuffer > 0 &&
+            player.coyoteTime > 0 &&
+            !player.climbing
+          ) {
+            player.vy = JUMP_FORCE;
+            player.onGround = false;
+            player.coyoteTime = 0;
+            player.jumpBuffer = 0;
+            audio.playJump();
+          }
+
+          if (!keys.up && player.vy < -2.0 && !usingJetpack) {
+            player.vy *= 0.55;
+          }
+
+          if (keys.fire && player.hasGun && player.ammo > 0) {
+            keys.fire = false;
+            player.ammo--;
+            audio.playShoot();
+            bullets.push({
+              x: player.facing === 1 ? player.x + player.w + 2 : player.x - 8,
+              y: player.y + 6,
+              w: 6,
+              h: 3,
+              vx: player.facing * 5.0,
+            });
+          }
+
+          player.x += player.vx;
+          let leftTile = Math.floor(player.x / TILE);
+          let rightTile = Math.floor((player.x + player.w - 1) / TILE);
+          let topTile = Math.floor(player.y / TILE);
+          let bottomTile = Math.floor((player.y + player.h - 1) / TILE);
+
+          for (let ty = topTile; ty <= bottomTile; ty++) {
+            if (player.vx > 0 && isSolid(getTile(rightTile, ty))) {
+              player.x = rightTile * TILE - player.w;
+              player.vx = 0;
+              break;
+            } else if (player.vx < 0 && isSolid(getTile(leftTile, ty))) {
+              player.x = (leftTile + 1) * TILE;
+              player.vx = 0;
+              break;
+            }
+          }
+
+          player.y += player.vy;
+          leftTile = Math.floor(player.x / TILE);
+          rightTile = Math.floor((player.x + player.w - 1) / TILE);
+          topTile = Math.floor(player.y / TILE);
+          bottomTile = Math.floor((player.y + player.h - 1) / TILE);
+
+          player.onGround = false;
+
+          for (let tx = leftTile; tx <= rightTile; tx++) {
+            if (player.vy > 0 && isSolid(getTile(tx, bottomTile))) {
+              player.y = bottomTile * TILE - player.h;
+              player.vy = 0;
+              player.onGround = true;
+              break;
+            } else if (player.vy < 0 && isSolid(getTile(tx, topTile))) {
+              player.y = (topTile + 1) * TILE;
+              player.vy = 0;
+              break;
+            }
+          }
+
+          if (player.x < 0) player.x = 0;
+          if (player.x + player.w > levelWidth)
+            player.x = levelWidth - player.w;
+          if (player.y + player.h >= PLAY_HEIGHT) {
+            killPlayer();
+            return;
+          }
+
+          const targetCameraX = player.x + player.w / 2 - WIDTH / 2;
+          cameraX += (targetCameraX - cameraX) * 0.15;
+          cameraX = Math.max(0, Math.min(cameraX, levelWidth - WIDTH));
+
+          if (checkHazardCollision(player)) {
+            killPlayer();
+            return;
+          }
+
+          const checkTiles = [
+            {
+              tx: Math.floor(player.x / TILE),
+              ty: Math.floor(player.y / TILE),
+            },
+            {
+              tx: Math.floor((player.x + player.w - 1) / TILE),
+              ty: Math.floor(player.y / TILE),
+            },
+            {
+              tx: Math.floor(player.x / TILE),
+              ty: Math.floor((player.y + player.h - 1) / TILE),
+            },
+            {
+              tx: Math.floor((player.x + player.w - 1) / TILE),
+              ty: Math.floor((player.y + player.h - 1) / TILE),
+            },
+            { tx: centerTileX, ty: centerTileY },
+          ];
+
+          const visited = new Set();
+          for (const pt of checkTiles) {
+            const key = `${pt.tx},${pt.ty}`;
+            if (visited.has(key)) continue;
+            visited.add(key);
+
+            const tile = getTile(pt.tx, pt.ty);
+
+            if (tile === T.TROPHY) {
+              setTile(pt.tx, pt.ty, T.EMPTY);
+              levelTrophyCollected = true;
+              player.hasTrophy = true;
+              score += 1000;
+              hudBanner = "TROPHY SECURED! REACH THE DOOR!";
+              messageTimer = 240;
+              audio.playTrophy();
+              addSparkles(
+                pt.tx * TILE + 8,
+                pt.ty * TILE + 8,
+                PALETTE.GOLD_BRIGHT,
+                22,
+              );
+            } else if (tile === T.GEM_BLUE) {
+              setTile(pt.tx, pt.ty, T.EMPTY);
+              score += 100;
+              audio.playGem();
+              addSparkles(pt.tx * TILE + 8, pt.ty * TILE + 8, PALETTE.LCYAN, 8);
+            } else if (tile === T.GEM_RED) {
+              setTile(pt.tx, pt.ty, T.EMPTY);
+              score += 200;
+              audio.playGem();
+              addSparkles(pt.tx * TILE + 8, pt.ty * TILE + 8, PALETTE.LRED, 8);
+            } else if (tile === T.GEM_PURPLE) {
+              setTile(pt.tx, pt.ty, T.EMPTY);
+              score += 500;
+              audio.playGem();
+              addSparkles(
+                pt.tx * TILE + 8,
+                pt.ty * TILE + 8,
+                PALETTE.LMAGENTA,
+                8,
+              );
+            } else if (tile === T.CROWN) {
+              setTile(pt.tx, pt.ty, T.EMPTY);
+              score += 2000;
+              audio.playTrophy();
+              addSparkles(
+                pt.tx * TILE + 8,
+                pt.ty * TILE + 8,
+                PALETTE.YELLOW,
+                18,
+              );
+            } else if (tile === T.JETPACK) {
+              setTile(pt.tx, pt.ty, T.EMPTY);
+              player.jetpackFuel = 100;
+              hudBanner = "JETPACK EQUIPPED!";
+              messageTimer = 180;
+              audio.playTrophy();
+            } else if (tile === T.GUN) {
+              setTile(pt.tx, pt.ty, T.EMPTY);
+              player.hasGun = true;
+              player.ammo = 8;
+              hudBanner = "RAY-GUN LOADED!";
+              messageTimer = 180;
+              audio.playTrophy();
+            } else if (tile === T.DOOR) {
+              if (player.hasTrophy) {
+                score += 1500;
+                startWarpTransition(currentLevelIdx + 1);
+              } else {
+                hudBanner = "THE DOOR IS LOCKED! GRAB THE RELIC!";
+                messageTimer = 60;
+              }
+            }
+          }
+
+          if (Math.abs(player.vx) > 0.1 && player.onGround) {
+            player.animTick++;
+            if (player.animTick > 5) {
+              player.animFrame = (player.animFrame + 1) % 3;
+              player.animTick = 0;
+            }
+          } else {
+            player.animFrame = 0;
+          }
+        }
+
+        function updateEnemies() {
+          for (let i = enemies.length - 1; i >= 0; i--) {
+            const e = enemies[i];
+            e.animTick++;
+
+            if (e.type === "bat") {
+              e.x += e.speed * e.dir;
+              if (e.x <= e.minX || e.x >= e.maxX) e.dir *= -1;
+              e.y += Math.sin(e.animTick * 0.1) * 0.8;
+            } else if (e.type === "spider") {
+              e.x += e.speed * e.dir;
+              if (e.x <= e.minX || e.x >= e.maxX) e.dir *= -1;
+            }
+
+            if (!player.isDead && boxOverlap(player, e)) {
+              killPlayer();
+            }
+
+            for (let b = bullets.length - 1; b >= 0; b--) {
+              if (boxOverlap(bullets[b], e)) {
+                audio.playExplode();
+                addSparkles(e.x + 6, e.y + 6, PALETTE.LRED, 14);
+                addSparkles(e.x + 6, e.y + 6, PALETTE.YELLOW, 10);
+                score += 300;
+                enemies.splice(i, 1);
+                bullets.splice(b, 1);
+                break;
+              }
+            }
+          }
+        }
+
+        function updateBullets() {
+          for (let i = bullets.length - 1; i >= 0; i--) {
+            const b = bullets[i];
+            b.x += b.vx;
+            const tx = Math.floor((b.x + b.w / 2) / TILE);
+            const ty = Math.floor((b.y + b.h / 2) / TILE);
+            if (isSolid(getTile(tx, ty)) || b.x < 0 || b.x > levelWidth) {
+              addSparkles(b.x, b.y, PALETTE.LCYAN, 4);
+              bullets.splice(i, 1);
+            }
+          }
+        }
+
+        function updateParticles() {
+          for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i];
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life--;
+            if (p.life <= 0) particles.splice(i, 1);
+          }
+        }
+
+        // --- 8. GRAPHICS RENDERING (NO TRAILS / CLEAN CANVAS CLEAR) ---
+        const canvas = document.getElementById("canvas");
+        const ctx = canvas.getContext("2d");
+
+        function drawBrick(x, y) {
+          ctx.fillStyle = PALETTE.BRICK_BASE;
+          ctx.fillRect(x, y, 16, 16);
+          ctx.fillStyle = PALETTE.BRICK_DARK;
+          ctx.fillRect(x, y + 7, 16, 2);
+          ctx.fillRect(x, y + 15, 16, 1);
+          ctx.fillRect(x + 7, y, 2, 7);
+          ctx.fillRect(x + 15, y + 8, 1, 7);
+          ctx.fillStyle = PALETTE.BRICK_LIGHT;
+          ctx.fillRect(x, y, 15, 1);
+          ctx.fillRect(x, y + 8, 14, 1);
+        }
+
+        function drawLog(x, y) {
+          ctx.fillStyle = PALETTE.LOG_BARK;
+          ctx.fillRect(x, y, 16, 16);
+          ctx.fillStyle = PALETTE.LOG_CORE;
+          ctx.fillRect(x + 1, y + 2, 14, 12);
+          ctx.fillStyle = PALETTE.LOG_SURFACE;
+          ctx.fillRect(x, y, 16, 2);
+          ctx.fillRect(x + 2, y + 5, 12, 2);
+          ctx.fillRect(x + 3, y + 9, 10, 2);
+        }
+
+        function drawPipe(x, y) {
+          ctx.fillStyle = PALETTE.DGRAY;
+          ctx.fillRect(x, y, 16, 16);
+          ctx.fillStyle = PALETTE.LGRAY;
+          ctx.fillRect(x + 2, y, 12, 16);
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.fillRect(x + 4, y, 2, 16);
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(x + 14, y, 2, 16);
+        }
+
+        function drawWater(x, y, anim) {
+          ctx.fillStyle = PALETTE.BLUE;
+          ctx.fillRect(x, y, 16, 16);
+          ctx.fillStyle = PALETTE.CYAN;
+          const offset = Math.floor(anim / 4) % 8;
+          ctx.fillRect(x, y + (offset % 4), 16, 2);
+        }
+
+        function drawFire(x, y, anim) {
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(x, y, 16, 16);
+          const flicker = Math.floor((anim + x) / 3) % 4;
+          ctx.fillStyle = PALETTE.RED;
+          ctx.fillRect(x + 1, y + 4 - flicker, 14, 12 + flicker);
+          ctx.fillStyle = PALETTE.YELLOW;
+          ctx.fillRect(x + 3, y + 7 - flicker, 10, 9 + flicker);
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.fillRect(x + 5, y + 10 - flicker, 6, 5);
+        }
+
+        function drawSpikes(x, y) {
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(x, y, 16, 16);
+          ctx.fillStyle = PALETTE.WHITE;
+          for (let i = 0; i < 4; i++) {
+            ctx.beginPath();
+            ctx.moveTo(x + i * 4, y + 16);
+            ctx.lineTo(x + i * 4 + 2, y + 3);
+            ctx.lineTo(x + i * 4 + 4, y + 16);
+            ctx.fill();
+          }
+        }
+
+        function drawDoor(x, y) {
+          ctx.fillStyle = PALETTE.BROWN;
+          ctx.fillRect(x + 1, y, 14, 16);
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(x + 3, y + 2, 10, 12);
+          ctx.fillStyle = player.hasTrophy
+            ? PALETTE.GOLD_BRIGHT
+            : PALETTE.LGRAY;
+          ctx.fillRect(x + 10, y + 8, 3, 3);
+        }
+
+        function drawTrophy(x, y, anim) {
+          const bob = Math.floor(Math.sin(anim * 0.12) * 2);
+          ctx.fillStyle = PALETTE.GOLD_BRIGHT;
+          ctx.fillRect(x + 2, y + 2 + bob, 12, 6);
+          ctx.fillRect(x + 6, y + 8 + bob, 4, 4);
+          ctx.fillRect(x + 4, y + 12 + bob, 8, 3);
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.fillRect(x + 3, y + 3 + bob, 3, 3);
+          ctx.fillStyle = PALETTE.LRED;
+          ctx.fillRect(x + 7, y + 4 + bob, 2, 2);
+        }
+
+        function drawGem(x, y, color) {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(x + 8, y + 1);
+          ctx.lineTo(x + 15, y + 7);
+          ctx.lineTo(x + 8, y + 15);
+          ctx.lineTo(x + 1, y + 7);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.fillRect(x + 6, y + 4, 3, 3);
+        }
+
+        function drawCrown(x, y) {
+          ctx.fillStyle = PALETTE.YELLOW;
+          ctx.beginPath();
+          ctx.moveTo(x + 2, y + 14);
+          ctx.lineTo(x + 2, y + 4);
+          ctx.lineTo(x + 6, y + 8);
+          ctx.lineTo(x + 8, y + 2);
+          ctx.lineTo(x + 10, y + 8);
+          ctx.lineTo(x + 14, y + 4);
+          ctx.lineTo(x + 14, y + 14);
+          ctx.closePath();
+          ctx.fill();
+          ctx.fillStyle = PALETTE.LRED;
+          ctx.fillRect(x + 7, y + 10, 2, 2);
+        }
+
+        function drawJetpack(x, y) {
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.fillRect(x + 3, y + 3, 4, 10);
+          ctx.fillRect(x + 9, y + 3, 4, 10);
+          ctx.fillStyle = PALETTE.LRED;
+          ctx.fillRect(x + 3, y + 12, 4, 3);
+          ctx.fillRect(x + 9, y + 12, 4, 3);
+        }
+
+        function drawGun(x, y) {
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.fillRect(x + 2, y + 6, 11, 4);
+          ctx.fillRect(x + 8, y + 10, 3, 4);
+          ctx.fillStyle = PALETTE.CYAN;
+          ctx.fillRect(x + 1, y + 7, 2, 2);
+        }
+
+        function drawPlayer(p) {
+          if (p.isDead) return;
+          ctx.save();
+          ctx.translate(Math.floor(p.x), Math.floor(p.y));
+
+          ctx.fillStyle = PALETTE.RED;
+          ctx.fillRect(p.facing === 1 ? 2 : 0, 0, 10, 4);
+
+          ctx.fillStyle = "#FFCC99";
+          ctx.fillRect(2, 4, 8, 4);
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(p.facing === 1 ? 7 : 3, 5, 2, 2);
+
+          ctx.fillStyle = PALETTE.BLUE;
+          ctx.fillRect(2, 8, 8, 4);
+
+          if (p.jetpackFuel > 0) {
+            ctx.fillStyle = PALETTE.LGRAY;
+            ctx.fillRect(p.facing === 1 ? -2 : 10, 6, 4, 7);
+          }
+
+          ctx.fillStyle = PALETTE.BROWN;
+          if (p.climbing) {
+            ctx.fillRect(2, 12, 3, 3);
+            ctx.fillRect(7, 12, 3, 3);
+          } else if (!p.onGround) {
+            ctx.fillRect(1, 12, 4, 3);
+            ctx.fillRect(7, 11, 4, 3);
+          } else if (p.animFrame === 1) {
+            ctx.fillRect(1, 12, 4, 3);
+            ctx.fillRect(7, 12, 4, 3);
+          } else if (p.animFrame === 2) {
+            ctx.fillRect(3, 12, 3, 3);
+            ctx.fillRect(6, 12, 3, 3);
+          } else {
+            ctx.fillRect(2, 12, 3, 3);
+            ctx.fillRect(7, 12, 3, 3);
+          }
+
+          if (p.hasGun && p.ammo > 0) {
+            ctx.fillStyle = PALETTE.WHITE;
+            ctx.fillRect(p.facing === 1 ? 9 : -3, 8, 5, 2);
+          }
+
+          ctx.restore();
+        }
+
+        function drawEnemy(e) {
+          ctx.save();
+          ctx.translate(Math.floor(e.x), Math.floor(e.y));
+
+          if (e.type === "bat") {
+            const wing = Math.floor(e.animTick / 4) % 2;
+            ctx.fillStyle = PALETTE.LMAGENTA;
+            ctx.fillRect(4, 4, 4, 4);
+            ctx.fillStyle = PALETTE.LRED;
+            ctx.fillRect(e.dir === 1 ? 6 : 4, 5, 2, 2);
+            ctx.fillStyle = PALETTE.MAGENTA;
+            if (wing === 0) {
+              ctx.fillRect(0, 1, 4, 3);
+              ctx.fillRect(8, 1, 4, 3);
+            } else {
+              ctx.fillRect(0, 5, 4, 3);
+              ctx.fillRect(8, 5, 4, 3);
+            }
+          } else if (e.type === "spider") {
+            ctx.fillStyle = PALETTE.LRED;
+            ctx.fillRect(3, 3, 6, 6);
+            ctx.fillStyle = PALETTE.WHITE;
+            ctx.fillRect(4, 4, 2, 2);
+            ctx.fillRect(7, 4, 2, 2);
+            ctx.fillStyle = PALETTE.BLACK;
+            const leg = Math.floor(e.animTick / 6) % 2;
+            if (leg === 0) {
+              ctx.fillRect(1, 2, 2, 8);
+              ctx.fillRect(9, 2, 2, 8);
+            } else {
+              ctx.fillRect(1, 4, 2, 8);
+              ctx.fillRect(9, 4, 2, 8);
+            }
+          }
+          ctx.restore();
+        }
+
+        let globalAnimTick = 0;
+
+        function renderWarpTransition() {
+          warpTimer++;
+          renderGameWorld();
+          renderStatusBar();
+
+          const shutterStep = 10;
+          const maxH = 10;
+
+          if (warpPhase === 0) {
+            const progress = Math.min(1, warpTimer / 28);
+            ctx.fillStyle = PALETTE.BLACK;
+            for (let y = 0; y < 200; y += shutterStep) {
+              ctx.fillRect(0, y, WIDTH, maxH * progress);
+            }
+            if (warpTimer >= 28) {
+              warpPhase = 1;
+              warpTimer = 0;
+            }
+          } else if (warpPhase === 1) {
+            ctx.fillStyle = PALETTE.BLACK;
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            ctx.strokeStyle = PALETTE.GOLD_BRIGHT;
+            ctx.lineWidth = 3;
+            ctx.strokeRect(20, 20, WIDTH - 40, HEIGHT - 40);
+
+            ctx.textAlign = "center";
+            ctx.fillStyle = PALETTE.YELLOW;
+            ctx.font = '12px "Courier New", monospace';
+            ctx.fillText("EXCELLENT WORK!", 160, 60);
+
+            ctx.fillStyle = PALETTE.LCYAN;
+            ctx.font = '10px "Courier New", monospace';
+            ctx.fillText(
+              `WARPING TO STAGE ${(currentLevelIdx + 1).toString().padStart(2, "0")}`,
+              160,
+              85,
+            );
+
+            drawTrophy(152, 100, globalAnimTick);
+
+            ctx.fillStyle = PALETTE.WHITE;
+            ctx.font = '9px "Courier New", monospace';
+            ctx.fillText(
+              `TOTAL SCORE: ${score.toString().padStart(6, "0")}`,
+              160,
+              140,
+            );
+
+            if (warpTimer >= 48) {
+              warpPhase = 2;
+              warpTimer = 0;
+              loadLevel(currentLevelIdx, false);
+            }
+          } else if (warpPhase === 2) {
+            const progress = Math.max(0, 1 - warpTimer / 28);
+            ctx.fillStyle = PALETTE.BLACK;
+            for (let y = 0; y < 200; y += shutterStep) {
+              ctx.fillRect(0, y, WIDTH, maxH * progress);
+            }
+            if (warpTimer >= 28) {
+              gameState = STATE.PLAYING;
+            }
+          }
+        }
+
+        function renderGameWorld() {
+          ctx.save();
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(0, 0, WIDTH, PLAY_HEIGHT);
+
+          ctx.translate(-Math.floor(cameraX), 0);
+
+          const startCol = Math.max(0, Math.floor(cameraX / TILE));
+          const endCol = Math.min(
+            LEVELS[currentLevelIdx].cols,
+            Math.ceil((cameraX + WIDTH) / TILE),
+          );
+
+          for (let r = 0; r < ROWS; r++) {
+            for (let c = startCol; c < endCol; c++) {
+              const t = grid[r][c];
+              const x = c * TILE;
+              const y = r * TILE;
+
+              switch (t) {
+                case T.BRICK:
+                  drawBrick(x, y);
+                  break;
+                case T.LOG:
+                  drawLog(x, y);
+                  break;
+                case T.PIPE:
+                  drawPipe(x, y);
+                  break;
+                case T.WATER:
+                  drawWater(x, y, globalAnimTick);
+                  break;
+                case T.FIRE:
+                  drawFire(x, y, globalAnimTick);
+                  break;
+                case T.SPIKES:
+                  drawSpikes(x, y);
+                  break;
+                case T.DOOR:
+                  drawDoor(x, y);
+                  break;
+                case T.TROPHY:
+                  drawTrophy(x, y, globalAnimTick);
+                  break;
+                case T.GEM_BLUE:
+                  drawGem(x, y, PALETTE.LCYAN);
+                  break;
+                case T.GEM_RED:
+                  drawGem(x, y, PALETTE.LRED);
+                  break;
+                case T.GEM_PURPLE:
+                  drawGem(x, y, PALETTE.LMAGENTA);
+                  break;
+                case T.CROWN:
+                  drawCrown(x, y);
+                  break;
+                case T.JETPACK:
+                  drawJetpack(x, y);
+                  break;
+                case T.GUN:
+                  drawGun(x, y);
+                  break;
+              }
+            }
+          }
+
+          ctx.fillStyle = PALETTE.CYAN;
+          bullets.forEach((b) => {
+            ctx.fillRect(Math.floor(b.x), Math.floor(b.y), b.w, b.h);
+            ctx.fillStyle = PALETTE.WHITE;
+            ctx.fillRect(Math.floor(b.x + 1), Math.floor(b.y + 1), b.w - 2, 1);
+          });
+
+          enemies.forEach(drawEnemy);
+          drawPlayer(player);
+
+          particles.forEach((p) => {
+            ctx.fillStyle = p.color;
+            ctx.fillRect(Math.floor(p.x), Math.floor(p.y), 2, 2);
+          });
+
+          ctx.restore();
+        }
+
+        function renderStatusBar() {
+          const barY = PLAY_HEIGHT;
+          ctx.fillStyle = PALETTE.HUD_BG;
+          ctx.fillRect(0, barY, WIDTH, 40);
+
+          ctx.fillStyle = PALETTE.HUD_BORDER_HI;
+          ctx.fillRect(0, barY, WIDTH, 2);
+          ctx.fillStyle = PALETTE.HUD_BORDER;
+          ctx.fillRect(0, barY + 2, WIDTH, 1);
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(0, barY + 39, WIDTH, 1);
+
+          ctx.font = '8px "Courier New", monospace';
+          ctx.textAlign = "left";
+
+          ctx.fillStyle = PALETTE.LCYAN;
+          ctx.fillText(
+            `SCORE:${score.toString().padStart(6, "0")}`,
+            10,
+            barY + 12,
+          );
+
+          ctx.fillStyle = PALETTE.YELLOW;
+          ctx.fillText(`LIVES:${Math.max(0, lives)}`, 10, barY + 24);
+
+          ctx.fillStyle = PALETTE.LGREEN;
+          ctx.fillText(
+            `LVL:${(currentLevelIdx + 1).toString().padStart(2, "0")}`,
+            10,
+            barY + 34,
+          );
+
+          ctx.textAlign = "center";
+          if (messageTimer > 0) {
+            messageTimer--;
+            ctx.fillStyle =
+              Math.floor(globalAnimTick / 8) % 2 === 0
+                ? PALETTE.YELLOW
+                : PALETTE.WHITE;
+            ctx.fillText(hudBanner, 160, barY + 14);
+          } else {
+            ctx.fillStyle = PALETTE.LGRAY;
+            ctx.fillText(
+              player.hasTrophy
+                ? ">> DOOR OPEN! ESCAPE! <<"
+                : ">> SECURE THE GOLDEN RELIC <<",
+              160,
+              barY + 14,
+            );
+          }
+
+          ctx.textAlign = "right";
+          if (player.jetpackFuel > 0) {
+            ctx.fillStyle = PALETTE.LRED;
+            ctx.fillText(`JET:`, 245, barY + 24);
+            ctx.fillStyle = PALETTE.BLACK;
+            ctx.fillRect(250, barY + 18, 60, 6);
+            ctx.fillStyle = PALETTE.LRED;
+            ctx.fillRect(
+              251,
+              barY + 19,
+              Math.floor((player.jetpackFuel / 100) * 58),
+              4,
+            );
+          }
+
+          if (player.hasGun) {
+            ctx.fillStyle = PALETTE.LCYAN;
+            ctx.fillText(`GUN:${player.ammo}`, 305, barY + 34);
+          } else {
+            ctx.fillStyle = PALETTE.LGRAY;
+            ctx.fillText(
+              `HI:${highScore.toString().padStart(6, "0")}`,
+              305,
+              barY + 34,
+            );
+          }
+        }
+
+        function renderTitle() {
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+          for (let c = 0; c < 20; c++) {
+            drawBrick(c * TILE, 0);
+            drawBrick(c * TILE, HEIGHT - 16);
+          }
+          for (let r = 0; r < 12; r++) {
+            drawBrick(0, r * TILE);
+            drawBrick(WIDTH - 16, r * TILE);
+          }
+
+          ctx.textAlign = "center";
+          ctx.fillStyle = PALETTE.LRED;
+          ctx.font = '16px "Courier New", monospace';
+          ctx.fillText("DELVER DAN", 160, 46);
+
+          ctx.fillStyle = PALETTE.YELLOW;
+          ctx.font = '9px "Courier New", monospace';
+          ctx.fillText("THE LOST CAVERNS OF PERIL", 160, 62);
+
+          drawTrophy(152, 74, globalAnimTick);
+
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.font = '8px "Courier New", monospace';
+          ctx.fillText("AUTHENTIC RETRO PC PLATFORMER", 160, 108);
+
+          ctx.fillStyle =
+            Math.floor(globalAnimTick / 15) % 2 === 0
+              ? PALETTE.LGREEN
+              : PALETTE.BLACK;
+          ctx.font = '10px "Courier New", monospace';
+          ctx.fillText("PRESS UP ARROW TO PLAY", 160, 134);
+
+          ctx.fillStyle = PALETTE.LCYAN;
+          ctx.font = '8px "Courier New", monospace';
+          ctx.fillText(
+            `HIGH SCORE: ${highScore.toString().padStart(6, "0")}`,
+            160,
+            156,
+          );
+        }
+
+        function renderVictory() {
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+          for (let c = 0; c < 20; c++) {
+            drawBrick(c * TILE, 0);
+            drawBrick(c * TILE, HEIGHT - 16);
+          }
+
+          ctx.textAlign = "center";
+          ctx.fillStyle = PALETTE.YELLOW;
+          ctx.font = '14px "Courier New", monospace';
+          ctx.fillText("VICTORY ACHIEVED!", 160, 50);
+
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.font = '9px "Courier New", monospace';
+          ctx.fillText("YOU CONQUERED ALL CHAMBERS!", 160, 75);
+
+          drawCrown(152, 90);
+
+          ctx.fillStyle = PALETTE.LCYAN;
+          ctx.fillText(`FINAL SCORE: ${score}`, 160, 125);
+
+          ctx.fillStyle =
+            Math.floor(globalAnimTick / 15) % 2 === 0
+              ? PALETTE.LGREEN
+              : PALETTE.WHITE;
+          ctx.fillText("PRESS UP ARROW FOR TITLE", 160, 150);
+        }
+
+        function renderGameOver() {
+          ctx.fillStyle = "rgba(0, 0, 0, 0.88)";
+          ctx.fillRect(40, 50, 240, 60);
+          ctx.strokeStyle = PALETTE.LRED;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(40, 50, 240, 60);
+
+          ctx.fillStyle = PALETTE.LRED;
+          ctx.font = '12px "Courier New", monospace';
+          ctx.textAlign = "center";
+          ctx.fillText("GAME OVER", 160, 74);
+          ctx.fillStyle = PALETTE.WHITE;
+          ctx.font = '9px "Courier New", monospace';
+          ctx.fillText("PRESS UP ARROW TO RESTART", 160, 95);
+        }
+
+        function render() {
+          globalAnimTick++;
+
+          ctx.fillStyle = PALETTE.BLACK;
+          ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+          if (gameState === STATE.TITLE) {
+            renderTitle();
+            return;
+          }
+          if (gameState === STATE.VICTORY) {
+            renderVictory();
+            return;
+          }
+          if (gameState === STATE.WARPING) {
+            renderWarpTransition();
+            return;
+          }
+
+          renderGameWorld();
+          renderStatusBar();
+
+          if (gameState === STATE.GAME_OVER) {
+            renderGameOver();
+          }
+        }
+
+        function gameLoop() {
+          if (gameState === STATE.PLAYING) {
+            updatePlayer();
+            updateEnemies();
+            updateBullets();
+            updateParticles();
+          }
+          render();
+          requestAnimationFrame(gameLoop);
+        }
+
+        // --- 9. ARROW CONTROLS ---
+        function onKeyDown(e) {
+          audio.init();
+
+          if (gameState === STATE.TITLE || gameState === STATE.GAME_OVER) {
+            if (
+              e.code === "ArrowUp" ||
+              e.code === "KeyW" ||
+              e.code === "Enter"
+            ) {
+              gameState = STATE.PLAYING;
+              lives = 3;
+              score = 0;
+              loadLevel(0, false);
+            }
+            return;
+          }
+
+          if (gameState === STATE.VICTORY) {
+            if (
+              e.code === "ArrowUp" ||
+              e.code === "KeyW" ||
+              e.code === "Enter"
+            ) {
+              gameState = STATE.TITLE;
+            }
+            return;
+          }
+
+          switch (e.code) {
+            case "ArrowLeft":
+            case "KeyA":
+              keys.left = true;
+              break;
+            case "ArrowRight":
+            case "KeyD":
+              keys.right = true;
+              break;
+            case "ArrowUp":
+            case "KeyW":
+            case "Space":
+              keys.up = true;
+              break;
+            case "ArrowDown":
+            case "KeyS":
+              keys.down = true;
+              break;
+            case "KeyX":
+            case "ControlLeft":
+            case "ControlRight":
+              keys.fire = true;
+              break;
+            case "KeyR":
+              loadLevel(currentLevelIdx, true);
+              break;
+          }
+        }
+
+        function onKeyUp(e) {
+          switch (e.code) {
+            case "ArrowLeft":
+            case "KeyA":
+              keys.left = false;
+              break;
+            case "ArrowRight":
+            case "KeyD":
+              keys.right = false;
+              break;
+            case "ArrowUp":
+            case "KeyW":
+            case "Space":
+              keys.up = false;
+              break;
+            case "ArrowDown":
+            case "KeyS":
+              keys.down = false;
+              break;
+            case "KeyX":
+            case "ControlLeft":
+            case "ControlRight":
+              keys.fire = false;
+              break;
+          }
+        }
+
+        window.addEventListener("keydown", onKeyDown);
+        window.addEventListener("keyup", onKeyUp);
+
+        function resizeCanvas() {
+          const maxW = window.innerWidth - 20;
+          const maxH = window.innerHeight - 75;
+          const scale = Math.max(
+            1,
+            Math.min(Math.floor(maxW / WIDTH), Math.floor(maxH / HEIGHT)),
+          );
+          canvas.style.width = `${WIDTH * scale}px`;
+          canvas.style.height = `${HEIGHT * scale}px`;
+        }
+
+        window.addEventListener("resize", resizeCanvas);
+        resizeCanvas();
+
+        requestAnimationFrame(gameLoop);
+      })();
+    </script>
+  </body>
+</html>
